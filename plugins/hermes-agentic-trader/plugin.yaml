@@ -1,0 +1,6 @@
+name: hermes-agentic-trader
+version: "0.7.0-repair.1"
+description: "Safety boundary for Hermes Agentic Trader while PR #60159 is being repaired against current Hermes."
+author: ivan09069
+hooks:
+  - pre_tool_call
