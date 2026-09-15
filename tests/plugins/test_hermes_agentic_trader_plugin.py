@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import types
 from pathlib import Path
@@ -40,6 +41,8 @@ def _load_plugin():
     mod.__path__ = [str(plugin_dir)]
     sys.modules["hermes_plugins.hermes_agentic_trader"] = mod
     spec.loader.exec_module(mod)
+    cache = sys.modules["hermes_plugins.hermes_agentic_trader.quote_cache"]
+    cache.clear_quote_cache()
     return mod
 
 
@@ -50,31 +53,161 @@ def _write_config(home: Path, trader):
     )
 
 
+def _swap_quote():
+    return {
+        "chainId": 8453,
+        "sellToken": "0x1111111111111111111111111111111111111111",
+        "sellAmount": "1000000",
+        "buyToken": "0x2222222222222222222222222222222222222222",
+        "transaction": {
+            "to": "0x3333333333333333333333333333333333333333",
+            "data": "0xdeadbeef",
+            "gas": "210000",
+            "gasPrice": "1000000",
+            "value": "0",
+        },
+    }
+
+
+def _gasless_quote():
+    return {
+        "trade": {
+            "type": "trade",
+            "eip712": {
+                "domain": {"chainId": 8453, "name": "Trade"},
+                "types": {"Trade": [{"name": "sellAmount", "type": "uint256"}]},
+                "primaryType": "Trade",
+                "message": {"sellAmount": "1000000"},
+            },
+        }
+    }
+
+
 class TestWriteQuarantine:
     @pytest.mark.parametrize("tool_name", ["execute_swap", "submit_gasless_swap"])
     def test_paper_mode_blocks_raw_write_tools(self, _isolate_env, tool_name):
         _write_config(_isolate_env, {"mode": "paper"})
         mod = _load_plugin()
-        out = mod._on_pre_tool_call(tool_name=tool_name, args={"quoteData": {}})
-        assert out == {
-            "action": "block",
-            "message": "Hermes Agentic Trader is in paper mode. Live MCP write tools are blocked.",
-        }
+        out = mod._on_pre_tool_call(
+            tool_name=tool_name,
+            args={"quoteData": {}},
+            session_id="s1",
+        )
+        assert out["action"] == "block"
+        assert "paper mode" in out["message"].lower()
 
-    @pytest.mark.parametrize("tool_name", ["execute_swap", "submit_gasless_swap"])
-    def test_live_mode_is_still_quarantined_during_repair(self, _isolate_env, tool_name):
+    def test_live_mode_rejects_unobserved_quote(self, _isolate_env):
         _write_config(_isolate_env, {"mode": "live"})
         mod = _load_plugin()
-        out = mod._on_pre_tool_call(tool_name=tool_name, args={"quoteData": {"chainId": 8453}})
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": _swap_quote()},
+            session_id="s1",
+        )
         assert out["action"] == "block"
-        assert "quarantined" in out["message"]
-        assert "quote-bound risk gate" in out["message"]
+        assert "not observed" in out["message"]
+
+    def test_live_mode_recognizes_exact_observed_quote_but_stays_quarantined(
+        self, _isolate_env
+    ):
+        _write_config(_isolate_env, {"mode": "live"})
+        mod = _load_plugin()
+        quote = _swap_quote()
+        result = json.dumps(
+            {"result": json.dumps({"message": "ok", "data": quote})}
+        )
+        mod._on_post_tool_call(
+            tool_name="get_swap_quote",
+            args={
+                "chainId": 8453,
+                "buyToken": quote["buyToken"],
+                "sellToken": quote["sellToken"],
+                "sellAmount": quote["sellAmount"],
+                "slippageBps": 50,
+            },
+            result=result,
+            status="ok",
+            session_id="s1",
+        )
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": quote},
+            session_id="s1",
+        )
+        assert out["action"] == "block"
+        assert "session-bound" in out["message"]
+
+    def test_quote_mutation_breaks_binding(self, _isolate_env):
+        _write_config(_isolate_env, {"mode": "live"})
+        mod = _load_plugin()
+        quote = _swap_quote()
+        mod._on_post_tool_call(
+            tool_name="get_swap_quote",
+            args={"chainId": 8453},
+            result={"message": "ok", "data": quote},
+            status="ok",
+            session_id="s1",
+        )
+        changed = json.loads(json.dumps(quote))
+        changed["transaction"]["to"] = "0x4444444444444444444444444444444444444444"
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": changed},
+            session_id="s1",
+        )
+        assert "not observed" in out["message"]
+
+    def test_quote_is_session_bound(self, _isolate_env):
+        _write_config(_isolate_env, {"mode": "live"})
+        mod = _load_plugin()
+        quote = _swap_quote()
+        mod._on_post_tool_call(
+            tool_name="get_swap_quote",
+            args={"chainId": 8453},
+            result={"message": "ok", "data": quote},
+            status="ok",
+            session_id="s1",
+        )
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": quote},
+            session_id="s2",
+        )
+        assert "not observed" in out["message"]
+
+    def test_gasless_quote_binds_to_gasless_write_only(self, _isolate_env):
+        _write_config(_isolate_env, {"mode": "live"})
+        mod = _load_plugin()
+        quote = _gasless_quote()
+        mod._on_post_tool_call(
+            tool_name="get_gasless_quote",
+            args={"chainId": 8453},
+            result={"message": "ok", "data": quote},
+            status="ok",
+            session_id="s1",
+        )
+        gasless = mod._on_pre_tool_call(
+            tool_name="submit_gasless_swap",
+            args={"quoteData": quote, "chainId": 8453},
+            session_id="s1",
+        )
+        direct = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": quote},
+            session_id="s1",
+        )
+        assert "session-bound" in gasless["message"]
+        assert "not observed" in direct["message"]
 
     def test_kill_switch_wins_over_live_mode(self, _isolate_env, monkeypatch):
         _write_config(_isolate_env, {"mode": "live"})
         monkeypatch.setenv("HERMES_TRADER_KILL_SWITCH", "1")
         mod = _load_plugin()
-        out = mod._on_pre_tool_call(tool_name="execute_swap", args={"quoteData": {}})
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": {}},
+            session_id="s1",
+        )
         assert out["action"] == "block"
         assert "kill switch" in out["message"].lower()
 
@@ -84,6 +217,7 @@ class TestWriteQuarantine:
         assert mod._on_pre_tool_call(
             tool_name="get_swap_quote",
             args={"chainId": 8453},
+            session_id="s1",
         ) is None
 
     def test_malformed_trader_config_fails_safe_to_paper(self, _isolate_env):
@@ -92,9 +226,40 @@ class TestWriteQuarantine:
             encoding="utf-8",
         )
         mod = _load_plugin()
-        out = mod._on_pre_tool_call(tool_name="execute_swap", args={"quoteData": {}})
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": {}},
+            session_id="s1",
+        )
         assert out["action"] == "block"
         assert "paper mode" in out["message"].lower()
+
+
+class TestMcpContractFixture:
+    def _contract(self):
+        path = (
+            _repo_root()
+            / "tests"
+            / "fixtures"
+            / "defi_trading_mcp_2_1_3_contract.json"
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_exact_version_and_source_commit_are_recorded(self):
+        contract = self._contract()
+        assert contract["version"] == "2.1.3"
+        assert contract["source_commit"] == "5a5c47f6a34b93ee11cf701d17e171cea0f775ed"
+
+    def test_write_tools_require_quote_data(self):
+        contract = self._contract()
+        assert contract["tools"]["execute_swap"]["required"] == ["quoteData"]
+        assert contract["tools"]["submit_gasless_swap"]["required"] == ["quoteData"]
+
+    def test_quote_tools_require_chain_and_token_amount_fields(self):
+        contract = self._contract()
+        expected = ["chainId", "buyToken", "sellToken", "sellAmount"]
+        assert contract["tools"]["get_swap_quote"]["required"] == expected
+        assert contract["tools"]["get_gasless_quote"]["required"] == expected
 
 
 class TestMcpManifest:
@@ -123,7 +288,7 @@ class TestMcpManifest:
 
 
 class TestPluginRegistration:
-    def test_registers_pre_tool_hook(self):
+    def test_registers_policy_hooks(self):
         mod = _load_plugin()
         calls = []
 
@@ -132,6 +297,7 @@ class TestPluginRegistration:
                 calls.append((name, fn))
 
         mod.register(Ctx())
-        assert len(calls) == 1
-        assert calls[0][0] == "pre_tool_call"
-        assert calls[0][1] is mod._on_pre_tool_call
+        assert [name for name, _fn in calls] == [
+            "pre_tool_call",
+            "post_tool_call",
+        ]

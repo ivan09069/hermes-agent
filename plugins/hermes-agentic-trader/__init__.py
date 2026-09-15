@@ -1,11 +1,8 @@
 """Hermes Agentic Trader safety boundary.
 
-This repair plugin intentionally keeps live swap execution quarantined while
-PR #60159 is ported to current Hermes. Read/quote tools remain available, but
-raw write tools fail closed before dispatch.
-
-The policy lives at Hermes' supported pre_tool_call hook boundary rather than
-patching MCP transport internals.
+The repair branch keeps live execution fail-closed while preserving paper-safe
+reads and quotes. Execution is bound to quotes Hermes actually observed in the
+same session; raw model-supplied execution metadata is not trusted.
 """
 
 from __future__ import annotations
@@ -14,7 +11,10 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from .quote_cache import capture_quote, resolve_execution_quote
+
 LIVE_WRITE_TOOLS = frozenset({"execute_swap", "submit_gasless_swap"})
+QUOTE_TOOLS = frozenset({"get_swap_quote", "get_gasless_quote"})
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
@@ -51,11 +51,10 @@ def _block(message: str) -> dict[str, str]:
 def _on_pre_tool_call(
     tool_name: str = "",
     args: Optional[dict[str, Any]] = None,
+    session_id: Optional[str] = None,
     **_: Any,
 ) -> Optional[dict[str, str]]:
-    """Fail closed for live swap tools until the repaired quote-bound gate lands."""
-    del args
-
+    """Fail closed for live swap tools until the repaired risk gate is complete."""
     if tool_name not in LIVE_WRITE_TOOLS:
         return None
 
@@ -72,17 +71,50 @@ def _on_pre_tool_call(
             "Hermes Agentic Trader is in paper mode. Live MCP write tools are blocked."
         )
 
-    # Deliberate quarantine. PR #60159 previously validated a synthetic argument
-    # shape that does not match defi-trading-mcp@2.1.3's quoteData contract.
-    # Do not allow raw writes until quote-bound validation, portfolio/P&L context,
-    # and execution reconciliation have been ported and tested on current Hermes.
+    bound_quote = resolve_execution_quote(
+        tool_name=tool_name,
+        args=args or {},
+        session_id=session_id,
+        consume=False,
+    )
+    if bound_quote is None:
+        return _block(
+            "Hermes Agentic Trader blocked this write because quoteData was not "
+            "observed from the matching quote tool in this Hermes session, or the "
+            "quote expired."
+        )
+
     return _block(
-        "Hermes Agentic Trader live execution is quarantined on the PR #60159 "
-        "repair branch. Raw execute_swap/submit_gasless_swap calls are disabled "
-        "until the quote-bound risk gate and exact MCP contract tests are complete."
+        "Hermes Agentic Trader live execution is still quarantined on the "
+        "PR #60159 repair branch. The exact quote is session-bound, but the "
+        "notional, portfolio/P&L, mandate, and reconciliation gates are not all "
+        "ported yet."
     )
 
 
+def _on_post_tool_call(
+    tool_name: str = "",
+    args: Optional[dict[str, Any]] = None,
+    result: Any = None,
+    status: Optional[str] = None,
+    session_id: Optional[str] = None,
+    **_: Any,
+) -> None:
+    """Remember successful quote responses for later exact-object binding."""
+    if tool_name not in QUOTE_TOOLS:
+        return None
+    if status not in (None, "ok"):
+        return None
+    capture_quote(
+        tool_name=tool_name,
+        args=args or {},
+        result=result,
+        session_id=session_id,
+    )
+    return None
+
+
 def register(ctx) -> None:
-    """Register the fail-closed policy hook with current Hermes."""
+    """Register policy hooks with current Hermes."""
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
