@@ -12,6 +12,24 @@ import pytest
 import yaml
 
 
+AGGREGATOR_BACKED_TOOLS = {
+    "get_portfolio_tokens",
+    "get_portfolio_balances",
+    "get_portfolio_transactions",
+    "get_swap_price",
+    "get_swap_quote",
+    "execute_swap",
+    "get_supported_chains",
+    "get_liquidity_sources",
+    "get_gasless_price",
+    "get_gasless_quote",
+    "submit_gasless_swap",
+    "get_gasless_status",
+    "get_gasless_chains",
+    "get_gasless_approval_tokens",
+}
+
+
 @pytest.fixture(autouse=True)
 def _isolate_env(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
@@ -295,6 +313,13 @@ class TestMcpContractFixture:
         assert contract["version"] == "2.1.3"
         assert contract["source_commit"] == "5a5c47f6a34b93ee11cf701d17e171cea0f775ed"
 
+    def test_pinned_aggregator_transport_is_plaintext_http(self):
+        contract = self._contract()
+        assert contract["aggregator"] == {
+            "url": "http://44.252.136.98",
+            "transport": "plaintext_http",
+        }
+
     def test_write_tools_require_quote_data(self):
         contract = self._contract()
         assert contract["tools"]["execute_swap"]["required"] == ["quoteData"]
@@ -316,20 +341,19 @@ class TestMcpManifest:
         manifest = self._manifest()
         assert "defi-trading-mcp@2.1.3" in manifest["transport"]["args"]
 
-    def test_raw_write_tools_are_not_default_enabled(self):
+    def test_aggregator_backed_tools_are_not_default_enabled(self):
         manifest = self._manifest()
         enabled = set(manifest["tools"]["default_enabled"])
-        assert "execute_swap" not in enabled
-        assert "submit_gasless_swap" not in enabled
+        assert enabled.isdisjoint(AGGREGATOR_BACKED_TOOLS)
 
     def test_base_specific_trending_tool_is_default_enabled(self):
         manifest = self._manifest()
         assert "get_trending_pools_by_network" in manifest["tools"]["default_enabled"]
 
-    def test_private_key_is_optional_in_paper_mode(self):
+    def test_default_surface_does_not_request_wallet_credentials(self):
         manifest = self._manifest()
-        env = {item["name"]: item for item in manifest["auth"]["env"]}
-        assert env["USER_PRIVATE_KEY"]["required"] is False
+        names = {item["name"] for item in manifest["auth"]["env"]}
+        assert names == {"COINGECKO_API_KEY"}
 
 
 class TestPluginRegistration:

@@ -1,7 +1,7 @@
 ---
 name: hermes-agentic-trader
-description: Paper-safe Base/EVM market analysis using the pinned defi-trading MCP integration.
-version: 0.7.0-repair.1
+description: Paper-safe Base/EVM market analysis using a restricted defi-trading MCP surface.
+version: 0.7.0-repair.2
 author: ivan09069
 license: MIT
 platforms: [linux, macos, windows]
@@ -13,17 +13,28 @@ metadata:
 
 # Hermes Agentic Trader — Repair Track
 
-This skill is intentionally paper-safe while PR #60159 is being repaired for
-current Hermes. Live write tools remain blocked by the bundled
-hermes-agentic-trader plugin.
+This repair track is intentionally market-data-only. Live writes remain blocked
+by the bundled hermes-agentic-trader plugin.
 
 ## Required setup
 
-1. Install/configure the defi-trading MCP catalog entry.
+1. Install the curated defi-trading MCP catalog entry.
 2. Enable the safety plugin with: hermes plugins enable hermes-agentic-trader
 3. Keep trader.mode set to paper in ~/.hermes/config.yaml.
 
-A private key is not required for paper analysis.
+The default repair surface requires only a CoinGecko API key. It does not
+require a wallet address or private key.
+
+## Security boundary
+
+The exact pinned package, defi-trading-mcp@2.1.3, routes its aggregator-backed
+portfolio, swap quote, gasless, and execution features through an external
+plaintext HTTP endpoint. Those tools are intentionally excluded from the
+manifest's default include list.
+
+Do not manually enable execute_swap, submit_gasless_swap, get_swap_quote,
+get_gasless_quote, or the aggregator-backed portfolio tools for this repair
+track. The plugin still blocks raw write calls as defense in depth.
 
 ## Base market scan
 
@@ -44,7 +55,7 @@ CoinGecko/GeckoTerminal pool data distinguishes:
 
 The pool contract is never the token-to-buy address. Resolve the token
 relationship to the corresponding included token object, or its resource ID,
-before producing a trade recommendation.
+before producing a recommendation.
 
 ## Output
 
@@ -56,7 +67,6 @@ End with: PAPER MODE — no transaction submitted.
 
 ## Live execution
 
-execute_swap and submit_gasless_swap are quarantined on the repair track.
-Do not instruct the user to bypass the plugin gate. Live execution will only
-be enabled after quote binding, mandate validation, notional/portfolio/P&L
-limits, and execution reconciliation are all covered by tests.
+Live execution is not part of this repair-track surface. The quote-binding,
+signed-mandate, and deterministic risk modules are retained as fail-closed
+defense-in-depth and future migration work, but no transaction path is enabled.
