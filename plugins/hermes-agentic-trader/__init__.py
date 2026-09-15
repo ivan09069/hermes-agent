@@ -1,8 +1,9 @@
-"""Hermes Agentic Trader safety boundary.
+"""Hermes Agentic Trader safety boundary and local planning tools.
 
-The repair branch keeps live execution fail-closed while preserving paper-safe
-reads and quotes. Execution is bound to quotes Hermes actually observed in the
-same session; raw model-supplied execution metadata is not trusted.
+The repair track is paper-safe by default. Aggregator-backed MCP write paths
+remain fail-closed. The only transaction-oriented tool exposed by this plugin
+builds an unsigned EIP-5792 request from a direct on-chain Uniswap quote; it
+never receives a private key and never contacts a wallet.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from . import tools as _tools
 from .mandate import load_mandate
 from .policy import TraderPolicy
 from .quote_cache import capture_quote, resolve_execution_quote
@@ -57,7 +59,7 @@ def _on_pre_tool_call(
     session_id: Optional[str] = None,
     **_: Any,
 ) -> Optional[dict[str, str]]:
-    """Fail closed for live swap tools until every deterministic input is wired."""
+    """Fail closed for legacy aggregator-backed live swap tools."""
     if tool_name not in LIVE_WRITE_TOOLS:
         return None
 
@@ -108,8 +110,8 @@ def _on_pre_tool_call(
     )
     reason = decision.reason.value if decision.reason is not None else "UNEXPECTED_APPROVAL"
     return _block(
-        "Hermes Agentic Trader live execution remains quarantined on the "
-        f"PR #60159 repair branch. Gate {reason}: {decision.message}"
+        "Hermes Agentic Trader legacy MCP execution remains quarantined on "
+        f"the PR #60159 repair branch. Gate {reason}: {decision.message}"
     )
 
 
@@ -121,7 +123,7 @@ def _on_post_tool_call(
     session_id: Optional[str] = None,
     **_: Any,
 ) -> None:
-    """Remember successful quote responses for later exact-object binding."""
+    """Remember legacy MCP quote responses only for defense-in-depth gating."""
     if tool_name not in QUOTE_TOOLS:
         return None
     if status not in (None, "ok"):
@@ -136,6 +138,20 @@ def _on_post_tool_call(
 
 
 def register(ctx) -> None:
-    """Register policy hooks with current Hermes."""
+    """Register local planning tools plus legacy-MCP safety hooks."""
+    ctx.register_tool(
+        name="trader_uniswap_quote",
+        toolset="trader",
+        schema=_tools.TRADER_UNISWAP_QUOTE_SCHEMA,
+        handler=_tools.handle_uniswap_quote,
+        emoji="📈",
+    )
+    ctx.register_tool(
+        name="trader_uniswap_build_calls",
+        toolset="trader",
+        schema=_tools.TRADER_UNISWAP_BUILD_CALLS_SCHEMA,
+        handler=_tools.handle_uniswap_build_calls,
+        emoji="🧾",
+    )
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
