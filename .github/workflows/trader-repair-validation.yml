@@ -1,0 +1,39 @@
+name: Trader Repair Validation
+
+on:
+  push:
+    branches:
+      - repair/hermes-agentic-trader-60159
+
+permissions:
+  contents: read
+
+jobs:
+  trader-repair-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repair branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install core and test dependencies
+        run: uv sync --locked --python 3.11 --extra dev
+
+      - name: Run focused trader repair tests
+        run: |
+          uv run python -m pytest \
+            tests/plugins/test_hermes_agentic_trader_plugin.py \
+            tests/plugins/test_hermes_agentic_trader_market.py \
+            -q
