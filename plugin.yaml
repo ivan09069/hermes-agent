@@ -1,0 +1,7 @@
+name: hermes-agentic-trader
+version: "0.1.0"
+description: "Safe Base Uniswap V3 quoting and unsigned EIP-5792 transaction planning for Hermes."
+author: ivan09069
+provides_tools:
+  - trader_uniswap_quote
+  - trader_uniswap_build_calls
