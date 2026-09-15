@@ -36,10 +36,10 @@ TRADER_UNISWAP_QUOTE_SCHEMA = {
     "name": "trader_uniswap_quote",
     "description": (
         "Read-only Base mainnet Uniswap V3 single-pool quote. Uses eth_call "
-        "against the official QuoterV2 deployment and caches the result in "
-        "this Hermes session. Never signs or submits a transaction."
+        "against the official QuoterV2 deployment and caches the result briefly. "
+        "Never signs or submits a transaction."
     ),
-    "input_schema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "token_in": _ADDR,
@@ -59,11 +59,11 @@ TRADER_UNISWAP_BUILD_CALLS_SCHEMA = {
     "name": "trader_uniswap_build_calls",
     "description": (
         "Build an unsigned EIP-5792 wallet_sendCalls request from a fresh "
-        "same-session trader_uniswap_quote result. Produces an exact-amount "
-        "ERC-20 approval plus Uniswap SwapRouter02 exactInputSingle call. "
-        "Does not contact a wallet and cannot submit a transaction."
+        "trader_uniswap_quote result. Produces an exact-amount ERC-20 approval "
+        "plus Uniswap SwapRouter02 exactInputSingle call. Does not contact a "
+        "wallet and cannot submit a transaction."
     ),
-    "input_schema": {
+    "parameters": {
         "type": "object",
         "properties": {
             "quote_id": _STR,
@@ -93,8 +93,13 @@ def _trader_mapping() -> dict[str, Any]:
     return trader if isinstance(trader, dict) else {}
 
 
-def _session_id(kwargs: dict[str, Any]) -> str:
-    return str(kwargs.get("session_id") or "").strip()
+def _quote_scope(kwargs: dict[str, Any]) -> str:
+    """Use Hermes observability scope when supplied; random quote_id is fallback authority."""
+    for key in ("session_id", "task_id", "turn_id", "api_request_id"):
+        value = str(kwargs.get(key) or "").strip()
+        if value:
+            return f"{key}:{value}"
+    return "unscoped"
 
 
 def handle_uniswap_quote(args: dict, **kwargs) -> str:
@@ -104,7 +109,7 @@ def handle_uniswap_quote(args: dict, **kwargs) -> str:
             token_out=str(args.get("token_out") or ""),
             amount_in=args.get("amount_in"),
             fee=args.get("fee"),
-            session_id=_session_id(kwargs),
+            session_id=_quote_scope(kwargs),
         )
         return tool_result(
             {
@@ -122,6 +127,7 @@ def handle_uniswap_quote(args: dict, **kwargs) -> str:
                 "quoter": QUOTER_V2,
                 "source_commit": UNISWAP_DEPLOYMENT_SOURCE_COMMIT,
                 "read_only": True,
+                "expires_in_seconds": 120,
             }
         )
     except Exception as exc:
@@ -132,14 +138,13 @@ def handle_uniswap_quote(args: dict, **kwargs) -> str:
 
 def handle_uniswap_build_calls(args: dict, **kwargs) -> str:
     try:
-        session_id = _session_id(kwargs)
         quote = resolve_direct_quote(
             str(args.get("quote_id") or ""),
-            session_id=session_id,
+            session_id=_quote_scope(kwargs),
         )
         if quote is None:
             return tool_error(
-                "quote_id is missing, expired, or belongs to a different Hermes session"
+                "quote_id is missing, expired, or invalid for this Hermes execution scope"
             )
 
         policy = TraderPolicy.from_mapping(_trader_mapping())
