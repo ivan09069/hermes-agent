@@ -17,6 +17,11 @@ def _isolate_env(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv(
+        "USER_ADDRESS",
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    monkeypatch.setenv("HERMES_TRADER_MANDATE_SECRET", "test-secret")
     monkeypatch.delenv("HERMES_TRADER_KILL_SWITCH", raising=False)
     yield hermes_home
 
@@ -53,6 +58,18 @@ def _write_config(home: Path, trader):
     )
 
 
+def _install_mandate():
+    mandate = sys.modules["hermes_plugins.hermes_agentic_trader.mandate"]
+    signed = mandate.sign_mandate(
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        allowed_chain_ids=(8453,),
+        max_trade_usd=50,
+        max_slippage_bps=100,
+        max_writes_per_hour=10,
+    )
+    mandate.save_mandate(signed)
+
+
 def _swap_quote():
     return {
         "chainId": 8453,
@@ -66,6 +83,22 @@ def _swap_quote():
             "gasPrice": "1000000",
             "value": "0",
         },
+    }
+
+
+def _quote_request_args(quote):
+    return {
+        "chainId": 8453,
+        "buyToken": quote.get(
+            "buyToken",
+            "0x2222222222222222222222222222222222222222",
+        ),
+        "sellToken": quote.get(
+            "sellToken",
+            "0x1111111111111111111111111111111111111111",
+        ),
+        "sellAmount": quote.get("sellAmount", "1000000"),
+        "slippageBps": 50,
     }
 
 
@@ -107,24 +140,35 @@ class TestWriteQuarantine:
         assert out["action"] == "block"
         assert "not observed" in out["message"]
 
-    def test_live_mode_recognizes_exact_observed_quote_but_stays_quarantined(
-        self, _isolate_env
-    ):
+    def test_observed_quote_without_mandate_fails_closed(self, _isolate_env):
         _write_config(_isolate_env, {"mode": "live"})
         mod = _load_plugin()
+        quote = _swap_quote()
+        mod._on_post_tool_call(
+            tool_name="get_swap_quote",
+            args=_quote_request_args(quote),
+            result={"message": "ok", "data": quote},
+            status="ok",
+            session_id="s1",
+        )
+        out = mod._on_pre_tool_call(
+            tool_name="execute_swap",
+            args={"quoteData": quote},
+            session_id="s1",
+        )
+        assert "MANDATE_INVALID" in out["message"]
+
+    def test_valid_mandate_reaches_notional_fail_closed_gate(self, _isolate_env):
+        _write_config(_isolate_env, {"mode": "live"})
+        mod = _load_plugin()
+        _install_mandate()
         quote = _swap_quote()
         result = json.dumps(
             {"result": json.dumps({"message": "ok", "data": quote})}
         )
         mod._on_post_tool_call(
             tool_name="get_swap_quote",
-            args={
-                "chainId": 8453,
-                "buyToken": quote["buyToken"],
-                "sellToken": quote["sellToken"],
-                "sellAmount": quote["sellAmount"],
-                "slippageBps": 50,
-            },
+            args=_quote_request_args(quote),
             result=result,
             status="ok",
             session_id="s1",
@@ -135,7 +179,7 @@ class TestWriteQuarantine:
             session_id="s1",
         )
         assert out["action"] == "block"
-        assert "session-bound" in out["message"]
+        assert "NOTIONAL_UNAVAILABLE" in out["message"]
 
     def test_quote_mutation_breaks_binding(self, _isolate_env):
         _write_config(_isolate_env, {"mode": "live"})
@@ -143,7 +187,7 @@ class TestWriteQuarantine:
         quote = _swap_quote()
         mod._on_post_tool_call(
             tool_name="get_swap_quote",
-            args={"chainId": 8453},
+            args=_quote_request_args(quote),
             result={"message": "ok", "data": quote},
             status="ok",
             session_id="s1",
@@ -163,7 +207,7 @@ class TestWriteQuarantine:
         quote = _swap_quote()
         mod._on_post_tool_call(
             tool_name="get_swap_quote",
-            args={"chainId": 8453},
+            args=_quote_request_args(quote),
             result={"message": "ok", "data": quote},
             status="ok",
             session_id="s1",
@@ -178,10 +222,11 @@ class TestWriteQuarantine:
     def test_gasless_quote_binds_to_gasless_write_only(self, _isolate_env):
         _write_config(_isolate_env, {"mode": "live"})
         mod = _load_plugin()
+        _install_mandate()
         quote = _gasless_quote()
         mod._on_post_tool_call(
             tool_name="get_gasless_quote",
-            args={"chainId": 8453},
+            args=_quote_request_args(quote),
             result={"message": "ok", "data": quote},
             status="ok",
             session_id="s1",
@@ -196,7 +241,7 @@ class TestWriteQuarantine:
             args={"quoteData": quote},
             session_id="s1",
         )
-        assert "session-bound" in gasless["message"]
+        assert "NOTIONAL_UNAVAILABLE" in gasless["message"]
         assert "not observed" in direct["message"]
 
     def test_kill_switch_wins_over_live_mode(self, _isolate_env, monkeypatch):

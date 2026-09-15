@@ -11,7 +11,10 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from .mandate import load_mandate
+from .policy import TraderPolicy
 from .quote_cache import capture_quote, resolve_execution_quote
+from .risk import evaluate_bound_quote
 
 LIVE_WRITE_TOOLS = frozenset({"execute_swap", "submit_gasless_swap"})
 QUOTE_TOOLS = frozenset({"get_swap_quote", "get_gasless_quote"})
@@ -54,7 +57,7 @@ def _on_pre_tool_call(
     session_id: Optional[str] = None,
     **_: Any,
 ) -> Optional[dict[str, str]]:
-    """Fail closed for live swap tools until the repaired risk gate is complete."""
+    """Fail closed for live swap tools until every deterministic input is wired."""
     if tool_name not in LIVE_WRITE_TOOLS:
         return None
 
@@ -84,11 +87,29 @@ def _on_pre_tool_call(
             "quote expired."
         )
 
+    try:
+        policy = TraderPolicy.from_mapping(trader)
+    except (TypeError, ValueError) as exc:
+        return _block(f"Hermes Agentic Trader policy is invalid: {exc}")
+
+    try:
+        mandate = load_mandate()
+    except (OSError, ValueError, TypeError) as exc:
+        return _block(f"Hermes Agentic Trader mandate is invalid: {exc}")
+
+    decision = evaluate_bound_quote(
+        policy=policy,
+        record=bound_quote,
+        mandate=mandate,
+        notional_usd=None,
+        portfolio_value_usd=None,
+        daily_loss_pct=None,
+        pool_liquidity_usd=None,
+    )
+    reason = decision.reason.value if decision.reason is not None else "UNEXPECTED_APPROVAL"
     return _block(
-        "Hermes Agentic Trader live execution is still quarantined on the "
-        "PR #60159 repair branch. The exact quote is session-bound, but the "
-        "notional, portfolio/P&L, mandate, and reconciliation gates are not all "
-        "ported yet."
+        "Hermes Agentic Trader live execution remains quarantined on the "
+        f"PR #60159 repair branch. Gate {reason}: {decision.message}"
     )
 
 
