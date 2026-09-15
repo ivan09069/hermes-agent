@@ -357,16 +357,29 @@ class TestMcpManifest:
 
 
 class TestPluginRegistration:
-    def test_registers_policy_hooks(self):
+    def test_registers_tools_and_policy_hooks(self):
         mod = _load_plugin()
-        calls = []
+        hooks = []
+        registered_tools = []
 
         class Ctx:
+            def register_tool(self, **kwargs):
+                registered_tools.append(kwargs)
+
             def register_hook(self, name, fn):
-                calls.append((name, fn))
+                hooks.append((name, fn))
 
         mod.register(Ctx())
-        assert [name for name, _fn in calls] == [
+
+        assert [item["name"] for item in registered_tools] == [
+            "trader_uniswap_quote",
+            "trader_uniswap_build_calls",
+        ]
+        assert [item["toolset"] for item in registered_tools] == [
+            "trader",
+            "trader",
+        ]
+        assert [name for name, _fn in hooks] == [
             "pre_tool_call",
             "post_tool_call",
         ]
